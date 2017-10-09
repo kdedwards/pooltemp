@@ -1,0 +1,73 @@
+#!/bin/bash
+# Startup parameters
+# Load sensitive variables from seperate conf file
+# Varabiles loaded from external updatedns.conf file:
+#   googledns="a.record.of.dns.host"
+#   googleusername="zzzzzzzzzzz" 
+#   googlepassword="zzzzzzzzzzz"
+
+source ./updatedns.conf
+listenfor=60 #seconds
+thresh=1.5
+workingdir=/home/dedwards/pooltemp
+radiooutfile=$workingdir/radio
+lasttempfile=$workingdir/lasttemp
+
+echo Listening for temperature for $listenfor seconds....
+sudo /usr/local/bin/rtl_433 -q -F csv -C customary -T $listenfor -R 20 > $radiooutfile
+
+stringselector="Ambient\ Weather\ F007TH\ Thermo-Hygrometer.*,,"
+
+month="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d"-" -f2 | sed -e "s/^0//")"
+day="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d"-" -f3 | cut -d" " -f1 | sed -e "s/^0//")"
+hour="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d":" -f1 | cut -d" " -f2 | sed -e "s/^0//")"
+minute="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d":" -f2 | sed -e "s/^0//")"
+tempwhole="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d"." -f1 | cut -d "," -f23 | sed -e "s/^0//")"
+temppart="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d"." -f2 | cut -d "," -f1 | sed -e "s/^0//")"
+temppart=${temppart:0:1}
+
+echo debug: $month $day $hour $minute $tempwhole $temppart
+
+#Check to see that the numbers make sense, if not just forget it
+numberre='^[0-9]+$'
+radiooutarchive=$workingdir/archive/$month.$day.$hour.$minute.radioout
+echo Copying radio file to archive
+cp $radiooutfile $radiooutarchive
+if [[ "$hour" =~ $numberre && "$minute" =~ $numberre && "$tempwhole" =~ $numberre && "$temppart" =~ $numberre ]] ; then
+	ip=$hour.$minute.$tempwhole.$temppart
+	currtemp="$tempwhole.$temppart"
+	echo Generated IP: $ip
+	echo Parsed Temp: $currtemp
+	lasttemp="$(cat $lasttempfile)"
+	echo Last temp: $lasttemp
+	
+	if [ $(echo "$lasttemp > $currtemp " | bc) -eq 1 ] ; then
+		diff="$(echo $lasttemp - $currtemp | bc)"
+	else
+		diff="$(echo $currtemp - $lasttemp | bc)"
+	fi
+	if [ $(echo "$diff < $thresh" | bc) -eq 1 ] ; then
+		echo Update: $diff smaller than $thresh proceed
+	else
+		echo Don\'t Update: $diff larger than or equal to $thresh
+		cp $radiooutarchive $workingdir/errors
+		exit 2
+	fi
+	
+	if ! [ "$lasttemp" == "$currtemp" ] ; then
+		echo Temperature different, performing update.
+		uri="https://$googleusername:$googlepassword@domains.google.com/nic/update?hostname=$googledns&myip=$ip"
+		echo Generated URL: $uri
+		echo Calling curl
+		curl -s "$uri"
+		echo $tempwhole.$temppart > $lasttempfile
+	else
+		echo Temperature the same, no  update needed.
+		exit 1
+	fi
+else
+	echo Something went wrong: Non-numerics found unexpectedly.
+	exit 2
+fi
+
+
