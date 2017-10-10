@@ -3,21 +3,28 @@
 # Load sensitive variables from seperate conf file
 # Varabiles loaded from external updatedns.conf file:
 #   googledns="a.record.of.dns.host"
-#   googleusername="zzzzzzzzzzz" 
+#   googleusername="zzzzzzzzzzz"
 #   googlepassword="zzzzzzzzzzz"
-
 source ./updatedns.conf
+# How long to run rtl_433 to listen for a radio beacon
 listenfor=60 #seconds
+# How many degrees farenheit is an acceptable delta between previous and current reading. Added this to filter out
+# spurious readings from other devices.
 thresh=1.5
+# Working directory
 workingdir=/home/dedwards/pooltemp
+# File to capture the raw output from rtl_433
 radiooutfile=$workingdir/radio
+# File containing the last parsed temperature reading for next run of script
 lasttempfile=$workingdir/lasttemp
 
 echo Listening for temperature for $listenfor seconds....
+# Call rtl_433 given the parameters set above
 sudo /usr/local/bin/rtl_433 -q -F csv -C customary -T $listenfor -R 20 > $radiooutfile
-
+# Build a regex string filter to grab only the lines we're looking for
 stringselector="Ambient\ Weather\ F007TH\ Thermo-Hygrometer.*,,"
-
+# Parse out various data from the $radiooutfile for use later. Yes it's an abomination, I'll be forever sorry for what
+# follows below.
 month="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d"-" -f2 | sed -e "s/^0//")"
 day="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d"-" -f3 | cut -d" " -f1 | sed -e "s/^0//")"
 hour="$(grep "$stringselector" $radiooutfile | tail -n 1 | cut -d":" -f1 | cut -d" " -f2 | sed -e "s/^0//")"
@@ -28,24 +35,30 @@ temppart=${temppart:0:1}
 
 echo debug: $month $day $hour $minute $tempwhole $temppart
 
-#Check to see that the numbers make sense, if not just forget it
+# Check to see that the numbers make sense, if not just dump out, something went wrong.
+# Regex to make sure all of the expected numbers are...numeric.
 numberre='^[0-9]+$'
+# Save an archive file for debugging
 radiooutarchive=$workingdir/archive/$month.$day.$hour.$minute.radioout
 echo Copying radio file to archive
 cp $radiooutfile $radiooutarchive
+# Numeric conditional test.
 if [[ "$hour" =~ $numberre && "$minute" =~ $numberre && "$tempwhole" =~ $numberre && "$temppart" =~ $numberre ]] ; then
+	# Build an IP string with 4 octets from info parsed from $radioout
 	ip=$hour.$minute.$tempwhole.$temppart
 	currtemp="$tempwhole.$temppart"
 	echo Generated IP: $ip
 	echo Parsed Temp: $currtemp
+	# Get the value of the last read temperature
 	lasttemp="$(cat $lasttempfile)"
 	echo Last temp: $lasttemp
-	
+	# Figure out temperature delta and put it in $diff
 	if [ $(echo "$lasttemp > $currtemp " | bc) -eq 1 ] ; then
 		diff="$(echo $lasttemp - $currtemp | bc)"
 	else
 		diff="$(echo $currtemp - $lasttemp | bc)"
 	fi
+	# Check to make sure the temperature delta is within the expected value $diff < $thresh
 	if [ $(echo "$diff < $thresh" | bc) -eq 1 ] ; then
 		echo Update: $diff smaller than $thresh proceed
 	else
@@ -53,7 +66,9 @@ if [[ "$hour" =~ $numberre && "$minute" =~ $numberre && "$tempwhole" =~ $numberr
 		cp $radiooutarchive $workingdir/errors
 		exit 2
 	fi
-	
+
+	# Only do an update if the temperature is different. There's no reason to spam the DNS Update API if the temperature
+	# is the same.
 	if ! [ "$lasttemp" == "$currtemp" ] ; then
 		echo Temperature different, performing update.
 		uri="https://$googleusername:$googlepassword@domains.google.com/nic/update?hostname=$googledns&myip=$ip"
@@ -66,6 +81,7 @@ if [[ "$hour" =~ $numberre && "$minute" =~ $numberre && "$tempwhole" =~ $numberr
 		exit 1
 	fi
 else
+	# A numeric check failed. Quit.
 	echo Something went wrong: Non-numerics found unexpectedly.
 	exit 2
 fi
